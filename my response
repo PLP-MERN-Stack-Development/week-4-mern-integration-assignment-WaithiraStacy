@@ -1,0 +1,259 @@
+// server/server.js
+// ============================
+
+import express from 'express';
+import dotenv from 'dotenv';
+import mongoose from 'mongoose';
+import cors from 'cors';
+import postRoutes from './routes/postRoutes.js';
+import categoryRoutes from './routes/categoryRoutes.js';
+import authRoutes from './routes/authRoutes.js';
+import { errorHandler } from './middleware/errorHandler.js';
+import fileUpload from 'express-fileupload';
+
+dotenv.config();
+
+const app = express();
+app.use(cors());
+app.use(express.json());
+app.use(fileUpload());
+app.use('/uploads', express.static('uploads'));
+
+app.use('/api/posts', postRoutes);
+app.use('/api/categories', categoryRoutes);
+app.use('/api/auth', authRoutes);
+app.use(errorHandler);
+
+mongoose.connect(process.env.MONGO_URI, { useNewUrlParser: true, useUnifiedTopology: true })
+  .then(() => {
+    app.listen(process.env.PORT, () => {
+      console.log(`Server running on port ${process.env.PORT}`);
+    });
+  })
+  .catch((err) => console.error(err));
+
+
+// ============================
+// server/models/Post.js
+// ============================
+
+import mongoose from 'mongoose';
+
+const postSchema = new mongoose.Schema({
+  title: { type: String, required: true },
+  content: { type: String, required: true },
+  category: { type: mongoose.Schema.Types.ObjectId, ref: 'Category' },
+  image: { type: String },
+  author: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
+  comments: [{
+    user: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
+    text: String,
+    createdAt: { type: Date, default: Date.now }
+  }]
+}, { timestamps: true });
+
+export default mongoose.model('Post', postSchema);
+
+
+// ============================
+// server/models/Category.js
+// ============================
+
+import mongoose from 'mongoose';
+
+const categorySchema = new mongoose.Schema({
+  name: { type: String, required: true, unique: true }
+});
+
+export default mongoose.model('Category', categorySchema);
+
+
+// ============================
+// server/models/User.js
+// ============================
+
+import mongoose from 'mongoose';
+import bcrypt from 'bcryptjs';
+
+const userSchema = new mongoose.Schema({
+  username: { type: String, required: true, unique: true },
+  email: { type: String, required: true, unique: true },
+  password: { type: String, required: true }
+});
+
+userSchema.pre('save', async function () {
+  if (!this.isModified('password')) return;
+  this.password = await bcrypt.hash(this.password, 10);
+});
+
+export default mongoose.model('User', userSchema);
+
+
+// ============================
+// server/routes/postRoutes.js
+// ============================
+
+import express from 'express';
+import {
+  getAllPosts,
+  getPostById,
+  createPost,
+  updatePost,
+  deletePost
+} from '../controllers/postController.js';
+
+const router = express.Router();
+
+router.get('/', getAllPosts);
+router.get('/:id', getPostById);
+router.post('/', createPost);
+router.put('/:id', updatePost);
+router.delete('/:id', deletePost);
+
+export default router;
+
+
+// ============================
+// server/routes/categoryRoutes.js
+// ============================
+
+import express from 'express';
+import { getCategories, createCategory } from '../controllers/categoryController.js';
+
+const router = express.Router();
+
+router.get('/', getCategories);
+router.post('/', createCategory);
+
+export default router;
+
+
+// ============================
+// server/routes/authRoutes.js
+// ============================
+
+import express from 'express';
+import User from '../models/User.js';
+import bcrypt from 'bcryptjs';
+import jwt from 'jsonwebtoken';
+
+const router = express.Router();
+
+router.post('/register', async (req, res) => {
+  try {
+    const user = new User(req.body);
+    await user.save();
+    res.status(201).json(user);
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+router.post('/login', async (req, res) => {
+  const { email, password } = req.body;
+  const user = await User.findOne({ email });
+  if (!user) return res.status(401).json({ error: 'Invalid credentials' });
+
+  const isMatch = await bcrypt.compare(password, user.password);
+  if (!isMatch) return res.status(401).json({ error: 'Invalid credentials' });
+
+  const token = jwt.sign({ id: user._id }, process.env.JWT_SECRET);
+  res.json({ token, user });
+});
+
+export default router;
+
+
+// ============================
+// server/controllers/postController.js
+// ============================
+
+import Post from '../models/Post.js';
+
+export const getAllPosts = async (req, res, next) => {
+  try {
+    const posts = await Post.find().populate('category author');
+    res.json(posts);
+  } catch (err) {
+    next(err);
+  }
+};
+
+export const getPostById = async (req, res, next) => {
+  try {
+    const post = await Post.findById(req.params.id).populate('category author');
+    res.json(post);
+  } catch (err) {
+    next(err);
+  }
+};
+
+export const createPost = async (req, res, next) => {
+  try {
+    const post = new Post(req.body);
+    if (req.files?.image) {
+      const image = req.files.image;
+      const path = `uploads/${Date.now()}_${image.name}`;
+      await image.mv(path);
+      post.image = path;
+    }
+    await post.save();
+    res.status(201).json(post);
+  } catch (err) {
+    next(err);
+  }
+};
+
+export const updatePost = async (req, res, next) => {
+  try {
+    const post = await Post.findByIdAndUpdate(req.params.id, req.body, { new: true });
+    res.json(post);
+  } catch (err) {
+    next(err);
+  }
+};
+
+export const deletePost = async (req, res, next) => {
+  try {
+    await Post.findByIdAndDelete(req.params.id);
+    res.json({ message: 'Post deleted' });
+  } catch (err) {
+    next(err);
+  }
+};
+
+
+// ============================
+// server/controllers/categoryController.js
+// ============================
+
+import Category from '../models/Category.js';
+
+export const getCategories = async (req, res, next) => {
+  try {
+    const categories = await Category.find();
+    res.json(categories);
+  } catch (err) {
+    next(err);
+  }
+};
+
+export const createCategory = async (req, res, next) => {
+  try {
+    const category = new Category(req.body);
+    await category.save();
+    res.status(201).json(category);
+  } catch (err) {
+    next(err);
+  }
+};
+
+
+// ============================
+// server/middleware/errorHandler.js
+// ============================
+
+export const errorHandler = (err, req, res, next) => {
+  console.error(err.stack);
+  res.status(500).json({ error: err.message });
+};
